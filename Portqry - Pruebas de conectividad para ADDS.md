@@ -1,47 +1,135 @@
 # Pruebas de conectividad para Active Directory con PortQry
 
-Paso a paso práctico, comandos listos para copiar y lectura de resultados.
+## Introducción
 
-> **Objetivo**
+Durante actividades de troubleshooting de Active Directory es habitual encontrar síntomas que inicialmente parecen asociados a autenticación, políticas de grupo, replicación o resolución de nombres, pero cuyo origen real corresponde a restricciones de conectividad entre servidores y controladores de dominio.
+
+Este procedimiento utiliza PortQry para validar la disponibilidad de los principales puertos requeridos por Active Directory y ayudar a determinar si el problema está relacionado con servicios no disponibles, reglas de firewall, listas de control de acceso (ACL) u otro tipo de problemas de conectividad.
+
+> **Importante**
 >
-> Confirmar, desde el servidor que presenta el problema, qué puertos del controlador de dominio están disponibles, cerrados o filtrados.
+> PortQry permite validar alcanzabilidad y estado de escucha de puertos. No valida autenticación, permisos, funcionamiento del servicio, integridad de Active Directory ni validez de certificados.
+
+---
+
+## Objetivo
+
+Desde el servidor afectado, validar qué puertos requeridos por Active Directory se encuentran:
+
+- Disponibles y respondiendo.
+- Cerrados o sin servicios asociados.
+- Filtrados por dispositivos de red o firewalls.
+- Publicados dinámicamente mediante RPC.
+
+---
+
+## Cuándo utilizar este procedimiento
+
+Este procedimiento suele ser útil cuando se presentan escenarios como:
+
+- Errores de autenticación Kerberos.
+- Fallas de aplicación de Group Policy.
+- Problemas de incorporación de equipos al dominio.
+- Errores de replicación entre controladores de dominio.
+- Demoras durante inicio de sesión.
+- Fallas de comunicación entre aplicaciones y Active Directory.
+- Sospechas de filtrado de tráfico por firewalls o segmentación de red.
+
+---
 
 ## Contenido
 
-- [1. Ejecutar las pruebas](#1-ejecutar-las-pruebas)
-- [2. Cómo leer el resultado](#2-cómo-leer-el-resultado)
-- [3. Prompt para analizar la salida de PortQry](#3-prompt-para-analizar-la-salida-de-portqry)
-- [4. Resultados](#4-resultados)
+1. Pruebas TCP esenciales
+2. Pruebas UDP
+3. Descubrimiento de puertos RPC dinámicos
+4. Interpretación de resultados
+5. Validaciones adicionales recomendadas
+6. Prompt para análisis con IA
+7. Resultados
 
-## 1. Ejecutar las pruebas
+---
 
-### Prueba rápida de puertos principales: TCP
+# 1. Pruebas TCP esenciales
 
-**Qué hace:** consulta los puertos TCP esenciales de Active Directory.
+## Consideraciones previas
+
+Antes de ejecutar las pruebas:
+
+- Utilice la dirección IP del controlador de dominio destino.
+- Ejecute PortQry desde el servidor que presenta el problema.
+- Evite realizar las pruebas desde estaciones de administración o jump servers, ya que podrían existir rutas de red diferentes.
+
+### Puertos TCP principales
+
+La siguiente prueba valida los servicios más relevantes utilizados por un controlador de dominio:
+
+| Puerto | Servicio |
+|----------|----------|
+| 53 | DNS |
+| 88 | Kerberos |
+| 135 | RPC Endpoint Mapper |
+| 389 | LDAP |
+| 445 | SMB |
+| 464 | Kerberos Password Change |
+| 636 | LDAPS |
+| 3268 | Global Catalog |
+| 3269 | Global Catalog SSL |
 
 ```powershell
 .\portqry.exe -n 10.10.10.10 -l C:\config\All_ports.txt -p tcp -o 53,88,135,389,445,464,636,3268,3269
 ```
 
-### Validar DNS, Kerberos, NTP y LDAP: UDP
+### Observación práctica
 
-**Qué hace:** confirma la conectividad UDP con los servicios indicados.
+En muchos incidentes se observa que los puertos principales responden correctamente mientras que los puertos RPC dinámicos se encuentran bloqueados. En esos casos aplicaciones como ADUC, GPMC, DNS Manager o herramientas de administración remota pueden fallar aunque LDAP y Kerberos funcionen normalmente.
+
+---
+
+# 2. Validar DNS, Kerberos, NTP y LDAP mediante UDP
+
+Algunos protocolos continúan utilizando UDP para determinadas operaciones.
 
 ```powershell
 .\portqry.exe -n 10.10.10.10 -p udp -o 53,88,123,389,464
 ```
 
-### Descubrir los puertos RPC dinámicos en escucha
+### Puertos evaluados
 
-**Qué hace:** consulta el RPC Endpoint Mapper y guarda los puertos que usa el servidor en ese momento.
+| Puerto | Servicio |
+|----------|----------|
+| 53 | DNS |
+| 88 | Kerberos |
+| 123 | NTP |
+| 389 | LDAP |
+| 464 | Kerberos Password Change |
+
+### Observación práctica
+
+Los resultados UDP deben interpretarse con cautela. Es normal que algunos dispositivos de red o sistemas operativos no respondan de la misma forma que lo hacen ante conexiones TCP.
+
+Por este motivo, un resultado `LISTENING or FILTERED` no debe considerarse automáticamente una falla de conectividad.
+
+---
+
+# 3. Descubrir puertos RPC dinámicos
+
+Active Directory utiliza RPC dinámico para múltiples operaciones administrativas.
+
+Esta prueba consulta el Endpoint Mapper para identificar qué puertos publicados está utilizando el servidor.
 
 ```powershell
 .\portqry.exe -n 10.10.10.10 -l C:\config\rpc_epm.txt -p tcp -e 135 -y
 ```
 
-### Extraer los puertos RPC encontrados
+### Por qué es importante
 
-**Qué hace:** obtiene una lista única de los puertos TCP indicados por el Endpoint Mapper.
+Es frecuente encontrar firewalls configurados para permitir únicamente el puerto TCP 135.
+
+Aunque esto permite comunicarse con el Endpoint Mapper, las operaciones posteriores pueden fallar si el firewall bloquea los puertos dinámicos publicados por dicho servicio.
+
+---
+
+# 4. Extraer los puertos RPC identificados
 
 ```powershell
 $p = Select-String -Path .\rpc_epm.txt -Pattern 'ncacn_ip_tcp:[^\[\]]*\[(\d+)\]' |
@@ -49,55 +137,41 @@ $p = Select-String -Path .\rpc_epm.txt -Pattern 'ncacn_ip_tcp:[^\[\]]*\[(\d+)\]'
     Sort-Object -Unique
 ```
 
-### Probar los puertos RPC descubiertos
+### Resultado esperado
 
-**Qué hace:** verifica únicamente los puertos que el servidor acaba de publicar.
+El comando genera una colección única de puertos TCP utilizados actualmente por el controlador de dominio.
+
+---
+
+# 5. Validar los puertos RPC publicados
 
 ```powershell
 .\portqry.exe -n 10.10.10.10 -l C:\config\rpc_epm_test.txt -p tcp -o ($p -join ',')
 ```
 
-## 2. Cómo leer el resultado
+### Observación práctica
 
-| Estado | Qué significa | Acción recomendada |
-|---|---|---|
-| **LISTENING** | El puerto responde y hay un servicio escuchando. | El puerto está disponible. |
-| **NOT LISTENING** | El host respondió, pero ningún servicio escucha en ese puerto. | Validar que el rol o servicio corresponda y esté iniciado. |
-| **FILTERED** | No hubo respuesta. Puede existir un bloqueo de firewall, ACL, ruta o un host no alcanzable. | Revisar las reglas de firewall, las ACL y el enrutamiento. |
-| **LISTENING or FILTERED** | Resultado UDP ambiguo. No confirma éxito ni falla. | Confirmar mediante una prueba específica del servicio. |
+Si TCP 135 responde correctamente pero varios puertos RPC dinámicos aparecen como `FILTERED`, normalmente existe un firewall intermedio bloqueando el rango RPC dinámico.
 
-### Validaciones especiales
+Este patrón es uno de los problemas de conectividad más frecuentes observados en entornos segmentados.
 
-- **UDP 88:** `LISTENING or FILTERED` puede ser normal si TCP 88 aparece como `LISTENING`.
-- **UDP 123:** confirmar mediante:
+---
 
-  ```powershell
-  w32tm /stripchart /computer:10.10.10.10 /samples:3 /dataonly
-  ```
+# 6. Interpretación de resultados
 
-- **UDP 389:** si no muestra datos, confirmar mediante:
+## Estados posibles
 
-  ```powershell
-  nltest /dsgetdc:contoso.local /force
-  ```
+| Estado | Significado | Acción recomendada |
+|----------|----------|----------|
+| LISTENING | El servicio responde y existe un proceso escuchando. | Considerar el puerto disponible. |
+| NOT LISTENING | El host responde pero no existe un servicio asociado. | Validar configuración y servicios. |
+| FILTERED | No se recibió respuesta. | Revisar firewall, ACL 
 
-- **TCP 636 o 3269 con `NOT LISTENING`:** puede faltar un certificado válido. No necesariamente indica un problema de red.
-- **TCP 135 con `LISTENING` y puertos RPC con `FILTERED`:** el firewall permite el RPC Endpoint Mapper, pero bloquea el rango RPC dinámico.
+# 7. Apoyo en AI para interpretar resultados
 
-### Identificar puertos TCP en escucha en el servidor de destino
+## Prompt para analizar la salida de PortQry
 
-**Qué hace:** con privilegios administrativos identifica los puertos TCP requeridos que se encuentran en estado `Listen`.
-
-```powershell
-Get-NetTCPConnection -State Listen |
-    Where-Object LocalPort -in 53,88,135,389,445,464,636,3268,3269 |
-    Sort-Object LocalPort |
-    Format-Table LocalAddress, LocalPort, State, OwningProcess
-```
-
-## 3. Prompt para analizar la salida de PortQry
-
-Copie el siguiente texto en Copilot o en su asistente de IA y pegue al final la salida completa de PortQry:
+Copiar el siguiente texto en Copilot o  asistente de IA favorito:
 
 ```text
 Analiza la salida de PortQry de los archivos adjuntos sin asumir datos que no aparezcan en ella.
@@ -130,13 +204,4 @@ SALIDA DE PORTQRY en tres archivos:
 
 No arrojes resultados duplicados para los mismos puertos presentes en distintos archivos.
 ```
-
-## 4. Resultados
-
-Complete esta sección con los resultados obtenidos durante las pruebas.
-
-| Puerto | Protocolo | Servicio | Estado | Observaciones |
-|---:|:---:|---|---|---|
-| | | | | |
-
-> **Nota:** PortQry valida alcanzabilidad y escucha. No confirma permisos, autenticación, validez de certificados ni el funcionamiento completo de la aplicación.
+---
